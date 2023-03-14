@@ -71,19 +71,22 @@ int my_send(int sock, void *buffer, size_t size)
 {
   char *buf = (char*)buffer;
   ssize_t sz = size;
+  int count = 0;
   int w = 4000;
 
   while (sz > 0) {
     // MSG_NOSIGNALを指定した場合, シグナルは発生させず errno に EPIPE をセットする
     ssize_t write_bytes = send(sock, buf, sz, MSG_NOSIGNAL);
     if (write_bytes == -1) {
-      perror("send error ");
-      if (errno == EAGAIN) {
-        // 相手が準備できていない
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // 送信バッファーに入れることができない
         usleep(w);
         if (w < 1024000) w *= 2;
+        ++count;
         continue;
-      } else if (errno == ECONNRESET || errno == EPIPE) {
+      }
+      perror("send error ");
+      if (errno == ECONNRESET || errno == EPIPE) {
         // 接続が切れた
         return 1;
       } else {
@@ -91,7 +94,6 @@ int my_send(int sock, void *buffer, size_t size)
         close(sock);
         abort();
       }
-      w = 4000;
     }
     if (write_bytes == 0) {
       fprintf(stderr,"my_send : sent == 0");
@@ -99,6 +101,7 @@ int my_send(int sock, void *buffer, size_t size)
     }
     buf += write_bytes;
     sz -= write_bytes;
+    w = 4000;
   }
   // 送信サイズをチェック
   if (sz != 0) {
@@ -106,6 +109,7 @@ int my_send(int sock, void *buffer, size_t size)
     close(sock);
     abort();
   }
+  if (count>10) fprintf(stderr, "my_send : EAGAIN count = %d\n", count);
   return 0;
 }
 

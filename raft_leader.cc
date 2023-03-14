@@ -221,7 +221,8 @@ public:
       sleep(delay);
       if (delay < 16) delay *= 2;
     }
-    majority_num_ = follower_num_/2;
+    majority_num_ = follower_num_ / 2;
+    //majority_num_ = follower_num_ - 1;
 
 #ifdef ZMQ_PUBSUB
     pub_sock_ = zmq_socket(context_, ZMQ_PUB);
@@ -458,6 +459,8 @@ int main(int argc, char** argv)
     n = 1;
     bufsz_list[0] = atoi(argv[1]);
   }
+  fprintf(csvfp, "bufsize[B], count, total_time[s], latency[ms], throughput[MB/s]\n");
+  fprintf(stderr, "bufsize[B], count, total_time[s], latency[ms], throughput[MB/s]\n");
   for (int k=0; k<n; ++k) {
     buf_sz = bufsz_list[k] * 1024;
     char *buffer = (char*)calloc(1, buf_sz);
@@ -480,7 +483,7 @@ int main(int argc, char** argv)
         if (end_clock - start_clock > 2L*1000*1000*1000) break;
         //usleep(2000);
         //printf(" read_ok\n");
-        break;
+        //break;
       }
       clock_gettime(CLOCK_MONOTONIC, &ts2);
       double t = ts2.tv_sec - ts1.tv_sec + (ts2.tv_nsec - ts1.tv_nsec) / 1e9;
@@ -489,10 +492,10 @@ int main(int argc, char** argv)
       fprintf(stderr, "%zd, %zd, %.4f, %.2f, %.2f\n",
         buf_sz, i, t, t/i*1000, i*buf_sz/t/1e6);
       usleep(300*1000);
-      break;
+      //break;
     }
     free(buffer);
-    break;
+    //break;
   }
   //sleep(1);
   // end

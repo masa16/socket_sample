@@ -11,28 +11,28 @@ ALL := $(T1)_socket $(T2)_socket $(T1)_pubsub $(T2)_pubsub # $(T1)_reqrep $(T2)_
 all: $(ALL)
 
 %: %.cc
-	$(CX) $(CXFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CX) $(CXFLAGS) -o $@ $< $(LDFLAGS)
 
 %: %.c
-	$(CC) $(CCFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CCFLAGS) -o $@ $< $(LDFLAGS)
 
-raft_leader_pubsub: raft_leader.cc
-	$(CX) $(CXFLAGS) -DZMQ_PUBSUB -o $@ $^ $(LDFLAGS)
+raft_leader_pubsub: raft_leader.cc my_sock.h
+	$(CX) $(CXFLAGS) -DZMQ_PUBSUB -o $@ $< $(LDFLAGS)
 
-raft_follower_pubsub: raft_follower.c
-	$(CC) $(CCFLAGS) -DZMQ_PUBSUB -o $@ $^ $(LDFLAGS)
+raft_follower_pubsub: raft_follower.c my_sock.h
+	$(CC) $(CCFLAGS) -DZMQ_PUBSUB -o $@ $< $(LDFLAGS)
 
-raft_leader_reqrep: raft_leader.cc
-	$(CX) $(CXFLAGS) -DZMQ_REQREP -o $@ $^ $(LDFLAGS)
+raft_leader_reqrep: raft_leader.cc my_sock.h
+	$(CX) $(CXFLAGS) -DZMQ_REQREP -o $@ $< $(LDFLAGS)
 
-raft_follower_reqrep: raft_follower.c
-	$(CC) $(CCFLAGS) -DZMQ_REQREP -o $@ $^ $(LDFLAGS)
+raft_follower_reqrep: raft_follower.c my_sock.h
+	$(CC) $(CCFLAGS) -DZMQ_REQREP -o $@ $< $(LDFLAGS)
 
-raft_leader_socket: raft_leader.cc
-	$(CX) $(CXFLAGS) -o $@ $^ $(LDFLAGS)
+raft_leader_socket: raft_leader.cc my_sock.h
+	$(CX) $(CXFLAGS) -o $@ $< $(LDFLAGS)
 
-raft_follower_socket: raft_follower.c
-	$(CC) $(CCFLAGS) -o $@ $^ $(LDFLAGS)
+raft_follower_socket: raft_follower.c my_sock.h
+	$(CC) $(CCFLAGS) -o $@ $< $(LDFLAGS)
 
 run: all
 	./raft ../../raft.conf

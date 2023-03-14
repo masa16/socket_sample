@@ -142,9 +142,11 @@ int main(int argc, char** argv)
     //fprintf(stderr,"%d recv data size=%d\n",port,len);
 #else
     if (my_recv(sock_client, buffer, ae_req.size)) goto ACCEPT;
+#if 0
     char s[] = "123456789";
     strncpy(s, buffer, 10);
     fprintf(stderr,"id=%d %s\n",ae_req.id,s);
+#endif
 #endif
     ae_res_t ae_res;
     ae_res.id = last_id = ae_req.id;
