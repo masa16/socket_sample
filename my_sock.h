@@ -1,6 +1,22 @@
 #ifndef _MY_SOCK_H
 #define _MY_SOCK_H  1
 
+/*
+#include "rdma/rsocket.h"
+
+#define socket     rsocket
+#define bind       rbind
+#define listen     rlisten
+#define accept     raccept
+#define connect    rconnect
+#define recv       rrecv
+#define send       rsend
+#define setsockopt rsetsockopt
+#define getsockopt rgetsockopt
+#define fcntl      rfcntl
+*/
+
+
 typedef struct _ae_req {
   int id;
   size_t size;
@@ -55,6 +71,7 @@ int my_send(int sock, void *buffer, size_t size)
 {
   char *buf = (char*)buffer;
   ssize_t sz = size;
+  int w = 4000;
 
   while (sz > 0) {
     // MSG_NOSIGNALを指定した場合, シグナルは発生させず errno に EPIPE をセットする
@@ -63,7 +80,8 @@ int my_send(int sock, void *buffer, size_t size)
       perror("send error ");
       if (errno == EAGAIN) {
         // 相手が準備できていない
-        usleep(100);
+        usleep(w);
+        if (w < 1024000) w *= 2;
         continue;
       } else if (errno == ECONNRESET || errno == EPIPE) {
         // 接続が切れた
@@ -73,6 +91,7 @@ int my_send(int sock, void *buffer, size_t size)
         close(sock);
         abort();
       }
+      w = 4000;
     }
     if (write_bytes == 0) {
       fprintf(stderr,"my_send : sent == 0");

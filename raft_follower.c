@@ -9,19 +9,19 @@
 #include <errno.h>
 #include "my_sock.h"
 
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+#include <zmq.h>
+#define ZERR(b) do{if(b){fprintf(stderr,"%16s %4d %16s: ZMQ error(%d): %s\n",__FILE__,__LINE__,__func__,zmq_errno() ,zmq_strerror(zmq_errno()));abort();}}while(0)
+#endif
 
-int main(int argc, char** argv)
+int sock_bind_listen(int port)
 {
   int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     perror("socket error ");
     exit(0);
   }
-  if (argc != 2 || argv[1]==0) {
-    printf("Usage : \n $> %s [port number]\n", argv[0]);
-    exit(0);
-  }
-  int port = atoi(argv[1]);
+
   struct sockaddr_in addr = {0,};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
@@ -49,24 +49,75 @@ int main(int argc, char** argv)
     exit(0);
   }
   printf("listen success!\n");
+  return sock;
+}
+
+
+int main(int argc, char** argv)
+{
+  if (argc < 2) {
+    printf("Usage : \n $> %s [port number]\n", argv[0]);
+    exit(0);
+  }
+  int port = atoi(argv[1]);
+  int sock = sock_bind_listen(port);
+
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+  if (argc < 3) {
+    printf("Usage : \n $> %s [port number]\n", argv[0]);
+    exit(0);
+  }
+  char url[128];
+  sprintf(url, "tcp://%s", argv[2]);
+  void *context_ = zmq_ctx_new();
+  //int sub_port = atoi(argv[2]);
+  void *sub_sock = 0;
+#else
+  char *buffer = (char*)malloc(32*1024*1024);
+#endif
 
   int last_id = 0;
   int sock_client = 0;
-  char *buffer = (char*)malloc(32*1024*1024);
 
  ACCEPT:
-  // 接続が切れた場合, acceptからやり直す
   printf("last_id=%d\n",last_id);
+  // 接続が切れた場合, acceptからやり直す
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+  if (sub_sock != 0) {
+    zmq_close(sub_sock);
+  }
+#endif
+#ifdef ZMQ_REQREP
+  sub_sock = zmq_socket(context_, ZMQ_REP);
+  ZERR(sub_sock==0);
+  int rc;
+  for (int i=0; i<5; ++i) {
+    rc = zmq_bind(sub_sock, "tcp://*:51112");
+    if (rc==0) break;
+    usleep(100000);
+  }
+  fprintf(stderr,"bind rep %p\n", sub_sock);
+  ZERR(rc!=0);
+#endif
+#ifdef ZMQ_PUBSUB
+  sub_sock = zmq_socket(context_, ZMQ_SUB);
+  ZERR(sub_sock==0);
+  int rc = zmq_setsockopt(sub_sock, ZMQ_SUBSCRIBE, "", 0);
+  ZERR(rc!=0);
+  rc = zmq_connect(sub_sock, url);
+  fprintf(stderr,"connect to publsr: %s, %p\n", url, sub_sock);
+  ZERR(rc!=0);
+#endif
   int old_sock_client = sock_client;
   struct sockaddr_in accept_addr = {0,};
   socklen_t accpet_addr_size = sizeof(accept_addr);
   sock_client = accept(sock, (struct sockaddr*)&accept_addr, &accpet_addr_size);
-  printf("sock_client=%d\n", sock_client);
+  fprintf(stderr,"sock_client=%d\n", sock_client);
   if (sock_client==0 || sock_client<0) {
     perror("accept error ");
     exit(0);
   }
-  printf("accept success!\n");
+  fprintf(stderr,"accept success!\n");
   if (old_sock_client > 0) {
     close(old_sock_client);
   }
@@ -75,8 +126,26 @@ int main(int argc, char** argv)
     ae_req_t ae_req;
 
     if (my_recv(sock_client, &ae_req, sizeof(ae_req_t))) goto ACCEPT;
+    //fprintf(stderr,"%d recv ae_req\n",port);
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+    zmq_msg_t msg;
+    rc = zmq_msg_init(&msg);
+    ZERR(rc!=0);
+    rc = zmq_msg_recv(&msg, sub_sock, 0);
+    ZERR(rc==-1);
+    int len = zmq_msg_size(&msg);
+    if (len > 0 && len != ae_req.size) {
+      fprintf(stderr, "len=%d != ae_req.size=%zd\n",len,ae_req.size);
+      abort();
+    }
+    rc = zmq_msg_close(&msg);
+    //fprintf(stderr,"%d recv data size=%d\n",port,len);
+#else
     if (my_recv(sock_client, buffer, ae_req.size)) goto ACCEPT;
-
+    char s[] = "123456789";
+    strncpy(s, buffer, 10);
+    fprintf(stderr,"id=%d %s\n",ae_req.id,s);
+#endif
     ae_res_t ae_res;
     ae_res.id = last_id = ae_req.id;
     ae_res.status = 0;

@@ -9,6 +9,7 @@ extern "C" {
 #include <errno.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <time.h>
 #include "my_sock.h"
 }
 #include <cassert>
@@ -21,6 +22,10 @@ extern "C" {
 #include <thread>
 #include <map>
 #include "host_data.hh"
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+#include <zmq.h>
+#define ZERR(b) do{if(b){fprintf(stderr,"%16s %4d %16s: ZMQ error(%d): %s\n",__FILE__,__LINE__,__func__,zmq_errno() ,zmq_strerror(zmq_errno()));abort();}}while(0)
+#endif
 
 #define MAXEVENTS 10
 #define PIPE_EVENT 1
@@ -45,6 +50,15 @@ typedef struct _res_count {
   int count;
   int fd;
 } res_count_t;
+
+
+static uint64_t rdtscp() {
+  uint64_t rax;
+  uint64_t rdx;
+  uint32_t aux;
+  asm volatile("rdtscp" : "=a"(rax), "=d"(rdx), "=c"(aux)::);
+  return (rdx << 32) | rax;
+}
 
 
 void read_ok(int sock) {
@@ -76,6 +90,7 @@ class Sender {
 public:
   std::vector<HostData> hosts_;
   std::vector<int> conn_socks_;
+  std::vector<void*> req_socks_;
   std::vector<std::pair<int,int>> pipes_;
   std::map<int,res_count_t> count_down_;
   int success_count_;
@@ -87,6 +102,10 @@ public:
   int pipe_num_=0;
   bool quit_=false;
   struct epoll_event *events_;
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+  void *context_;
+  void *pub_sock_;
+#endif
 
   Sender() {
     epoll_fd_ = epoll_create1(0);
@@ -141,6 +160,9 @@ public:
   }
 
   void connect_follower() {
+#if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
+    context_ = zmq_ctx_new();
+#endif
     for (auto &h : hosts_) {
       int conn_sock = 0;
       if (!h.is_leader_) {
@@ -151,6 +173,18 @@ public:
         }
       }
       conn_socks_.emplace_back(conn_sock);
+#ifdef ZMQ_REQREP
+      if (!h.is_leader_) {
+        void *req_sock = zmq_socket(context_, ZMQ_REQ);
+        ZERR(req_sock==0);
+        std::string url("tcp://");
+        url += h.hostname_+":51112";
+        int rc = zmq_connect(req_sock, url.c_str());
+        fprintf(stderr,"connect to rep: %s, %p\n", url.c_str(), req_sock);
+        ZERR(rc!=0);
+        req_socks_.emplace_back(req_sock);
+      }
+#endif
     }
     std::vector<bool> is_connected(hosts_.size(), false);
     int delay = 1;
@@ -188,13 +222,25 @@ public:
       if (delay < 16) delay *= 2;
     }
     majority_num_ = follower_num_/2;
+
+#ifdef ZMQ_PUBSUB
+    pub_sock_ = zmq_socket(context_, ZMQ_PUB);
+    assert(pub_sock_);
+    int rc;
+    for (int i=0; i<5; ++i) {
+      rc = zmq_bind(pub_sock_, "tcp://*:51111");
+      if (rc==0) break;
+      usleep(100000);
+    }
+    printf("bind publsr %p\n", pub_sock_);
+    ZERR(rc!=0);
+#endif
+    usleep(500000);
   }
 
-  void send_to_servers(int log_id, int fd, void *buffer, size_t size) {
+  void send_to_servers(int log_id, void *buffer, size_t size) {
     ae_req_t ae_req = {log_id, size};
     for (auto conn_sock : conn_socks_) {
-      char *buf = (char*)buffer;
-      ssize_t sz = size;
       if (conn_sock > 0) {
         int r;
         r = my_send(conn_sock, &ae_req, sizeof(ae_req_t));
@@ -202,13 +248,41 @@ public:
           fprintf(stderr, "connection closed");
           abort();
         }
+#if !(defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP))
+        char *buf = (char*)buffer;
+        ssize_t sz = size;
         r = my_send(conn_sock, buf, sz);
         if (r != 0) {
           fprintf(stderr, "connection closed");
           abort();
         }
+#endif
       }
     }
+#ifdef ZMQ_PUBSUB
+    zmq_msg_t msg;
+    int rc = zmq_msg_init_size(&msg, size);
+    assert(rc==0);
+    memcpy(zmq_msg_data(&msg), buffer, size);
+    int sz = zmq_msg_size(&msg);
+    rc = zmq_msg_send(&msg, pub_sock_, 0);
+    ZERR(rc==-1);
+    assert(rc==sz);
+#endif
+#ifdef ZMQ_REQREP
+    for (auto req_sock : req_socks_) {
+      zmq_msg_t msg;
+      int rc = zmq_msg_init_size(&msg, size);
+      assert(rc==0);
+      memcpy(zmq_msg_data(&msg), buffer, size);
+      int sz = zmq_msg_size(&msg);
+      rc = zmq_msg_send(&msg, req_sock, 0);
+      ZERR(rc==-1);
+      assert(rc==sz);
+    }
+#endif
+    //fprintf(stderr,"buffer=%p size=%zd\n",buffer,size);
+    //fprintf(stderr,"send_to_servers end\n");
   }
 
   void check_count(int id) {
@@ -278,7 +352,7 @@ public:
     ++log_id_;
     count_down_[log_id_] = {follower_num_, d->fd_res};
     PF("respond_pipe: log_id=%d fd=%d fd_res=%d size=%zd count_down_.size()=%zd\n", log_id_, d->fd, d->fd_res, size, count_down_.size());
-    send_to_servers(log_id_, d->fd_res, pipe_dat.ptr, pipe_dat.size);
+    send_to_servers(log_id_, pipe_dat.ptr, pipe_dat.size);
   }
 
   void handle_event() {
@@ -337,13 +411,22 @@ void worker(std::vector<std::pair<int,int>> pipes)
   for (auto pipe : pipes) {
     write_ok(pipe.second);
   }
-  while(1) {
+  while (1) {
     sender.handle_event();
   }
 }
 
 int main(int argc, char** argv)
 {
+  size_t buf_sz;
+
+
+#ifdef ZMQ_PUBSUB
+  const char csvname[] = "perf_pubsub.csv";
+#else
+  const char csvname[] = "perf_socket.csv";
+#endif
+  FILE *csvfp = fopen(csvname,"w");
   int r;
   int pipe_out[2], pipe_in[2];
   r = pipe(pipe_out);
@@ -360,30 +443,67 @@ int main(int argc, char** argv)
   std::vector<std::pair<int,int>> pipes{{pipe_out[0],pipe_in[1]}};
   std::thread th(worker, pipes);
 
-  char *buffer = (char*)calloc(1,BUF_SZ);
-  int i=0;
   pipe_data_t pipe_dat;
   ssize_t ret;
   read_ok(pipe_in[0]);
-  for (i=0; i<10; ++i) {
-    pipe_dat = {buffer, BUF_SZ};
-    ret = write(pipe_out[1], &pipe_dat, sizeof(pipe_dat));
-    printf("write %zd bytes to pipe\n", ret);
-    if (ret != sizeof(pipe_dat)) {
-      perror("write pipe error ");
-      abort();
-    }
-    read_ok(pipe_in[0]);
-    printf(" read_ok\n");
+
+  //if (argc != 2) {
+  //  printf("Usage : \n $> %s [buffer_size]\n", argv[0]);
+  //  exit(0);
+  //}
+  //size_t buf_sz = atoi(argv[1]);
+  size_t bufsz_list[] = {32, 64, 128, 256, 512, 1024, 2048, 4096};
+  int n = sizeof(bufsz_list)/sizeof(buf_sz);
+  if (argc == 2) {
+    n = 1;
+    bufsz_list[0] = atoi(argv[1]);
   }
-  sleep(1);
+  for (int k=0; k<n; ++k) {
+    buf_sz = bufsz_list[k] * 1024;
+    char *buffer = (char*)calloc(1, buf_sz);
+    memset(buffer, 'X', buf_sz);
+    for (int j=0; j<5; ++j) {
+      uint64_t i=0;
+      uint64_t end_clock, start_clock = rdtscp();
+      struct timespec ts1, ts2;
+      clock_gettime(CLOCK_MONOTONIC, &ts1);
+      for (i=0; ; ++i) {
+        pipe_dat = {buffer, buf_sz};
+        ret = write(pipe_out[1], &pipe_dat, sizeof(pipe_dat));
+        //printf("write %zd bytes to pipe\n", ret);
+        if (ret != sizeof(pipe_dat)) {
+          perror("write pipe error ");
+          abort();
+        }
+        read_ok(pipe_in[0]);
+        end_clock = rdtscp();
+        if (end_clock - start_clock > 2L*1000*1000*1000) break;
+        //usleep(2000);
+        //printf(" read_ok\n");
+        break;
+      }
+      clock_gettime(CLOCK_MONOTONIC, &ts2);
+      double t = ts2.tv_sec - ts1.tv_sec + (ts2.tv_nsec - ts1.tv_nsec) / 1e9;
+      fprintf(csvfp, "%zd, %zd, %.4f, %.2f, %.2f\n",
+        buf_sz, i, t, t/i*1000, i*buf_sz/t/1e6);
+      fprintf(stderr, "%zd, %zd, %.4f, %.2f, %.2f\n",
+        buf_sz, i, t, t/i*1000, i*buf_sz/t/1e6);
+      usleep(300*1000);
+      break;
+    }
+    free(buffer);
+    break;
+  }
+  //sleep(1);
+  // end
   pipe_dat = {NULL, 0};
   ret = write(pipe_out[1], &pipe_dat, sizeof(pipe_dat));
-  printf("write %zd bytes to pipe\n", ret);
+  //printf("write %zd bytes to pipe\n", ret);
   if (ret != sizeof(pipe_dat)) {
     perror("write pipe error ");
     abort();
   }
   th.join();
+  fclose(csvfp);
   return 0;
 }
