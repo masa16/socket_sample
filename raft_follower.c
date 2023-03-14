@@ -64,7 +64,7 @@ int main(int argc, char** argv)
 
 #if defined(ZMQ_PUBSUB) || defined(ZMQ_REQREP)
   if (argc < 3) {
-    printf("Usage : \n $> %s [port number]\n", argv[0]);
+    printf("Usage : \n $> %s [port_number] [ZMQ_URL]\n", argv[0]);
     exit(0);
   }
   char url[128];
